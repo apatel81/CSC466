@@ -1,0 +1,266 @@
+---
+title: "Do teams in the same conferences play football the same way? Is there a difference between style of play not only between conferences, but between the Power 5 (and ND) and Group of 5?"
+author: Ajay Patel
+output: html_notebook
+---
+
+A football team's style of play can be determined by it's season statistics. Pass-heavy teams will have more passing yards and passing TDs than an Alabama run-first team. Efficient teams will succeed in the redzone, while big play teams will have more explosive 40+ yards plays in a season. There are teams committed to stopping the pass, whereas other teams are committed to stopping the run. In order to deterine if teams in the same conference have similar styles of playing football, we will initially fit a KMeans clustering model to all the variables in the data and evaluate how the teams assigned to each cluster compare to each team's respective conference. Our hope is that if teams in each conference have similar playing styles, then the clustering model will show these teams assigned to the same cluster. If this initial hypothesis is incorrect, meaning there is a lot of variability in the cluster assignment and respective conference, we will attempt to extract the most important features from our dataset and re-run our clustering algorithm.
+
+
+##Reading Data and Loading Packages##
+```{r}
+
+library(tidyverse)
+library(cluster)    
+library(factoextra) 
+library(randomForest)
+require(caTools)
+library(ggfortify)
+library(ROCR)
+
+# Jack's data set
+df <- read.csv("/Users/ajaypatel21/Downloads/CFB2019.csv")
+
+```
+
+
+##Cleaning Data##
+```{r}
+
+df <- separate(df, "Team", into = c("Team", "Conference"), sep = "[(]" )
+df <- separate(df, "Win.Loss", into = c("Wins", "Losses"), sep = "-")
+df$Team <- str_trim(df$Team)
+df$Conference <- str_sub(df$Conference, 1, -2)
+df$Wins <- as.numeric(df$Wins)
+df$Losses <- as.numeric(df$Losses)
+drops <- c("Average Time of Possession per Game")
+df <- df[ , !(names(df) %in% drops)]
+
+```
+
+
+##KMeans Clustering (10 Clusters) - All Numeric Variables & PCA###
+
+Here we are looking to investigate how teams are clustered using all numeric columns in the dataset. After subsetting the data down to all the numeric columns, we fit a kmeans model to the new data, initializing the number of clusters to 10 (i.e. the number of conferences in the NCAA). In order to visualize all 144 columns in our numeric dataframe, we ran a principal component analysis to reduce the dimensionality of the data. The first plot below, "Teams and Respective Conferences" , displays a scatter plot of where each team lies, with repsect to PC1 and PC2, and each data point is colored by conference. The second plot below, "Teams and Assigned Cluster", similarly displays each team on a scatter plot, but instead of each team being colored by conference, each team is now labeled by its assigned cluster. The dendogram below, created using Ward's method, displays the hierarchy of how teams and then clusters got assigned together. In both clustering algorithms, Hawaii, LSU, and Washington State have been assigned to the same cluster, yet each team plays in a separate conference. This is most likely due to the fact that these 3 football teams were most well known for their prolific, pass-heavy offenses. Although the initial plots suggest that teams from the same conference do not lie in the same cluster, it appears the algorithms are doing a good job of clustering teams based on their season statistics.
+
+```{r}
+
+# Extracting the numeric columns from the dataset
+nums <- unlist(lapply(df, is.numeric))
+numeric_df <- df[ , nums]
+numeric_df$rowname <- df$Team
+
+# Setting the index of each row to the team name
+numeric_df <- column_to_rownames(numeric_df)
+
+# Fitting a KMeans model with 10 centroids
+k <- kmeans(numeric_df, centers = 10, nstart = 20)
+
+# Plotting code
+autoplot(prcomp(numeric_df), data = df, colour = 'Conference', label = TRUE, label.size = 3) + ggtitle("Teams and Respective Conference")
+autoplot(k, data = numeric_df, label = TRUE, label.size = 3) + ggtitle("Teams and Assigned Cluster")
+
+# Dendrogram Plot
+hc <- agnes(numeric_df, method = "ward")
+pltree(hc, cex = 0.6, hang = -1, main = "Dendrogram of Teams") 
+rect.hclust(hc, k = 10, border = 2:5)
+
+```
+
+
+
+
+
+
+###Evaluating initial KMeans Clustering###
+
+In order to determine how well our KMeans clustering algorithm actually performed, we will count the number of unique conferences represented by each each cluster. If teams from the same conference truly do have similar playing styles, we will see that each cluster has few distinct conferences. Below, for each cluster (1-10), we have created a bar chart to count the distinct conferences, and each bar is colored to show which teams have been assigned to which cluster. According to each of the plots, not only does each cluster have at least 5 distinct conferences, with exception to cluster number 2, but also each cluster has an unequal amount of teams assigned to the cluster. 
+
+```{r}
+
+# Adding assigned cluster to original dataframe
+df$cluster <- k$cluster
+
+# Plotting code for Conference Distribution by Cluster
+ggplot(df, aes(x = Conference, fill = Conference)) + geom_bar(show.legend = F) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Conference Distribution by Cluster") +
+  facet_wrap(~ df$cluster, ncol=2)
+
+```
+
+
+
+###Random Forest Classification Model### 
+
+Due to the fact that the KMeans clustering algorithm on all numeric variables did not meet our expectations, the next step to determine if teams have similar playing styles is to fit a Random Forest Classification model to the data and try to predict conference. The idea is that if we can successfully predict conference, perhaps the best features from the model can correctly cluster teams to the same conference. Note that we are dropping particular columns from the data, such as wins and losses, because we do not want the number of wins or losses to be the determing factor in a team's cluster asssignment.  
+
+```{r}
+
+# Making a copy of the original data frame, dropping columns 
+data <- df
+drops <- c("Time.of.Possession", "Average.Time.of.Possession.per.Game", "Games", "Wins", "Losses", "Team", "cluster")
+data <- data[ , !(names(data) %in% drops)]
+data$Conference = as.factor(data$Conference) 
+
+# Equivalent to train-test-split
+sample = sample.split(data$Conference, SplitRatio = .75)
+train = subset(data, sample == TRUE)
+test  = subset(data, sample == FALSE)
+
+# Fitting Random Foresting Model to training data
+rf <- randomForest(
+  formula = Conference ~ .,
+  data = train, 
+  importance = T
+)
+
+# Making predictions on test data (dropping the Conference variable)
+pred = predict(rf, newdata=test[-1])
+test$pred <- pred
+results <- data.frame(importance(rf))
+
+# Extracting the best features
+best_features <- rownames(results[order(results$MeanDecreaseAccuracy, decreasing = T), ])[1:12]
+best_features
+
+```
+
+
+
+
+###Evaluating our Random Forest Classification Model###
+
+After training and testing the Random Forest Classification Model, we can evaluate the how well our model performed in predicting conference. Below, we can see the Recall vs Precision curve and the ROC curve. Both plots indicate that our set of "best" features may not be able to successfully cluster teams together based on conference, however we will still re-run our KMeans model to be sure. 
+
+```{r}
+
+# Saving predictions in correct format for later functions
+y <- as.array(test$Conference == test$pred)
+predictions <- as.array(test$pred)
+
+pred <- prediction(as.numeric(predictions), as.numeric(y))
+
+# Recall-Precision curve             
+RP.perf <- performance(pred, "prec", "rec")
+
+plot(RP.perf, main="Precision vs Recall: Predicting Conference using RF Classification")
+
+# ROC curve
+ROC.perf <- performance(pred, "tpr", "fpr")
+plot(ROC.perf, main="ROC Curve: Predicting Conference using RF Classification")
+
+```
+
+
+###New KMeans Clustering (10 Clusters) with Best Features###
+
+Once again we have the same two plots below. First, each team colored by its respctive conference and second, each team and its respective assigned cluster. Like before, our KMeans clustering scatterplot appears to be vastly different than that of the Respective Conference scatterplot, suggesting that even the best features might not be able to determine if teams from the same conference have similar playing style. Rather, it appears teams are truly clustered together with respect to their season statistics. 
+
+```{r}
+
+# Plotting code for only best features
+k <- kmeans(numeric_df[ , best_features], centers = 10, nstart = 20)
+
+autoplot(prcomp(numeric_df[ , best_features]), data = df, colour = 'Conference', label = TRUE, label.size = 3) + ggtitle("Teams and Respective Conference")
+
+autoplot(k, data = numeric_df[ , best_features], label = TRUE, label.size = 3) + ggtitle("Teams and Assigned Cluster")
+
+# Dendrogram Plot
+hc <- agnes(numeric_df[ , best_features], method = "ward")
+pltree(hc, cex = 0.6, hang = -1, main = "Dendrogram of Teams") 
+rect.hclust(hc, k = 10, border = 2:5)
+
+```
+
+### Evaluating New KMeans Clustering (10 Clusters) with Best Features###
+
+Once again, we see each cluster has a vast amount on conferences represented. Ultimately, it appears that teams from the same conference do not have similar playing styles. There are a few reasons that this may be, despite all the data we have. One reason is coaching style, or team philosophy. Every coach in the NCAA and every team in the NCAA has different styled offense/defense. In the SEC, we see teams like Alabama and Auburn to be more defensive minded/run-heavy, whereas Texas A&M (in the same conference) is more of a pass heavy team. Another reason conference may not indicate playing style is because coaches have to fit their style of play to their players' strengths and weaknesses and not necessarily to how the conference is perceived. If you don't have a QB that can throw the ball to any spot on the field, you might be a team that chooses to run the ball more. Also, each team's goal going into a season is to win games. In order to do that, a coach might have to slightly change their scheme from week to week in order to give their team the best chance of winning.
+
+```{r}
+
+# Adding assigned cluster to original dataframe
+df$cluster <- k$cluster
+
+# Plotting code for Conference Distribution by Cluster
+ggplot(df, aes(x = Conference, fill = Conference)) + geom_bar(show.legend = F) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Conference Distribution by Cluster (Best Features)") +
+  facet_wrap(~ df$cluster, ncol=2)
+
+```
+
+###Can we distinguish teams from the Power 5 and the Group of 5?###
+
+Now, instead of trying to cluster teams to their respective conference, we will attempt to cluster teams to their "larger" conference name - Power 5 or Group of 5. Our hope is to determine if there is a difference in style of play between these 2 "larger" conferences. After assigning teams to their large conference, running a random foresting classification model to extract the best features (predicting for larger conference), and fitting the KMeans model with 2 centers, we can once again see that our cluster assignment is not similar to which larger conference each team lies in, suggesting that a team's playing style is independent of which larger conference they belong to. 
+
+```{r}
+
+# Creating Larger Conference variable
+df$LargerConference[df$Conference == "ACC" | df$Conference == "Big Ten" | df$Conference == "Big 12" |
+                    df$Conference == "Pac-12" | df$Conference == "SEC" | df$Team == "Notre Dame"] <- "Power 5"
+
+df$LargerConference[df$Conference == "Mountain West" | df$Conference == "MAC" | df$Conference == "Sun Belt" | 
+                      df$Conference == "C-USA" | df$Conference == "AAC"] <- "Group of 5"
+
+df$LargerConference[df$Conference == "FBS Independent"] <- "Independent"
+
+# Making a copy of the original data frame, dropping columns 
+data <- df
+drops <- c("Time.of.Possession", "Average.Time.of.Possession.per.Game", "Games", "Wins", "Losses", "Team", "cluster", "Conference")
+data <- data[ , !(names(data) %in% drops)]
+data$LargerConference = as.factor(data$LargerConference) 
+
+# Equivalent to train-test-split
+sample = sample.split(data$LargerConference, SplitRatio = .75)
+train = subset(data, sample == TRUE)
+test  = subset(data, sample == FALSE)
+
+# Fitting Random Foresting Model to training data
+rf <- randomForest(
+  formula = LargerConference ~ .,
+  data = train, 
+  importance = T
+)
+
+
+# Extracting the best features
+best_features <- rownames(results[order(results$MeanDecreaseAccuracy, decreasing = T), ])[1:12]
+best_features
+
+# Fitting a KMeans model with 2 centroids
+k <- kmeans(numeric_df[,best_features], centers = 2, nstart = 20)
+
+autoplot(prcomp(numeric_df[,best_features]), data = df, colour = 'LargerConference', label = TRUE, label.size = 3) + ggtitle("Teams and Respective Larger Conference")
+autoplot(k, data = numeric_df[,best_features], label = TRUE, label.size = 3) + ggtitle("Teams and Assigned Cluster")
+
+# Dendrogram plot
+hc <- agnes(numeric_df[,best_features], method = "ward")
+pltree(hc, cex = 0.6, hang = -1, main = "Dendrogram of Teams") 
+rect.hclust(hc, k = 2, border = 2:5)
+
+```
+
+###Evaluating our clustering of the Power 5 and Group of 5###
+
+In the plots below, we see that each cluster has a mix of teams from the Power 5 and Group of 5 leading us to believe that style of play is not related to larger conference - most likely due to the same reasons above and more that the data cannot explain. Rather, teams from the NCAA are clustered solely based on their season statistics. Although, we did not achieve our goal, our clustering algorithms can one day perhaps help determine which teams face off against each other in Bowl Games, or even which teams are represented in the College Football Playoffs.
+
+```{r}
+
+# Adding assigned cluster to original dataframe
+df$cluster <- k$cluster
+
+# Plotting code for Conference Distribution by Cluster
+ggplot(df, aes(x = Conference, fill = LargerConference)) + geom_bar() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Larger Conference Distribution by Cluster") +
+  facet_wrap(~ df$cluster, ncol=2)
+
+```
+
+
+
+
+
+
+
